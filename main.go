@@ -11,9 +11,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	sessionKey      = ""
-	sessionPassword = ""
+var (
+	sessionKey      = os.Getenv("SESSION_KEY")
+	sessionPassword = os.Getenv("SESSION_PASSWORD")
 )
 
 func main() {
