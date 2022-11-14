@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	sessionKey      = "mithleshmeghwal0@gmail.com"
-	sessionPassword = "mithLink@123"
+	sessionKey      = ""
+	sessionPassword = ""
 )
 
 func main() {
