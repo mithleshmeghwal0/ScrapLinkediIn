@@ -2,8 +2,10 @@ package http_client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
@@ -12,23 +14,22 @@ import (
 	"strings"
 
 	"example.com/login/network"
-	"github.com/sirupsen/logrus"
 )
 
 var debugNetwork bool = false
 
 type httpclient struct {
 	client *http.Client
-	log    *logrus.Entry
+	file   io.Writer
 }
 
-func New(client *http.Client, log *logrus.Entry) *httpclient {
+func New(client *http.Client, f io.Writer) *httpclient {
 	if os.Getenv("DEBUG_NETWORK") == "1" {
 		debugNetwork = true
 	}
 	return &httpclient{
 		client: client,
-		log:    log,
+		file:   f,
 	}
 }
 
@@ -56,7 +57,7 @@ func (hc *httpclient) PostFormData(body interface{}, uri string) network.Respons
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(strings.NewReader(data.Encode())),
 	}
-	return hc.do(req)
+	return do(req, hc)
 }
 
 func (hc *httpclient) PostFormDataBytes(body interface{}, uri string, headers map[string]string) network.ResponseBytes {
@@ -64,6 +65,7 @@ func (hc *httpclient) PostFormDataBytes(body interface{}, uri string, headers ma
 	if !ok {
 		return network.ResponseBytes{Response: nil, Err: fmt.Errorf("cannot cast payloads to []map[string]interface{}")}
 	}
+
 	data := url.Values{}
 	for key, value := range payloads {
 		_, ok := value.(string)
@@ -78,25 +80,19 @@ func (hc *httpclient) PostFormDataBytes(body interface{}, uri string, headers ma
 		}
 		data.Add(key, fmt.Sprintf("%v", value))
 	}
-	httpheaders := map[string][]string{
-		"Content-Type": {"application/x-www-form-urlencoded"},
-	}
-	for i := range headers {
-		httpheaders[i] = []string{headers[i]}
-	}
-	reqURL, err := url.Parse(uri)
+
+	req, err := http.NewRequest(http.MethodPost, uri, strings.NewReader(data.Encode()))
 	if err != nil {
 		return network.ResponseBytes{
 			Err: err,
 		}
 	}
-	req := &http.Request{
-		Method: http.MethodPost,
-		URL:    reqURL,
-		Header: httpheaders,
-		Body:   ioutil.NopCloser(strings.NewReader(data.Encode())),
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for key, val := range headers {
+		req.Header.Set(key, val)
 	}
-	return hc.doBytes(req)
+
+	return doBytes(req, hc)
 }
 
 func (hc *httpclient) Post(body interface{}, uri string) network.Response {
@@ -120,28 +116,22 @@ func (hc *httpclient) Post(body interface{}, uri string) network.Response {
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(bytes.NewReader(bodyMessage)),
 	}
-	return hc.do(req)
+	return do(req, hc)
 }
 
 func (hc *httpclient) GetBytes(uri string, headers map[string]string) network.ResponseBytes {
-	httpheaders := map[string][]string{
-		"Content-Type": {"application/json"},
-	}
-	for i := range headers {
-		httpheaders[i] = []string{headers[i]}
-	}
-	reqURL, err := url.Parse(uri)
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
 	if err != nil {
 		return network.ResponseBytes{
 			Err: err,
 		}
 	}
-	req := &http.Request{
-		Method: http.MethodGet,
-		URL:    reqURL,
-		Header: httpheaders,
+	req.Header.Set("Content-Type", "application/json")
+	for key, val := range headers {
+		req.Header.Set(key, val)
 	}
-	return hc.doBytes(req)
+
+	return doBytes(req, hc)
 }
 
 func (hc *httpclient) Get(uri string, headers map[string]string) network.Response {
@@ -162,7 +152,7 @@ func (hc *httpclient) Get(uri string, headers map[string]string) network.Respons
 		URL:    reqURL,
 		Header: httpheaders,
 	}
-	return hc.do(req)
+	return do(req, hc)
 }
 func (hc *httpclient) Delete(uri string, body interface{}, headers map[string]string) network.Response {
 	bodyMessage, err := json.Marshal(body)
@@ -189,7 +179,7 @@ func (hc *httpclient) Delete(uri string, body interface{}, headers map[string]st
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(bytes.NewReader(bodyMessage)),
 	}
-	return hc.do(req)
+	return do(req, hc)
 }
 
 func (hc *httpclient) PostJSON(body interface{}, uri string, headers map[string]string) network.Response {
@@ -217,7 +207,7 @@ func (hc *httpclient) PostJSON(body interface{}, uri string, headers map[string]
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(bytes.NewReader(bodyMessage)),
 	}
-	return hc.do(req)
+	return do(req, hc)
 }
 
 func (hc *httpclient) PostJSONBytes(body interface{}, uri string, headers map[string]string) network.ResponseBytes {
@@ -243,7 +233,7 @@ func (hc *httpclient) PostJSONBytes(body interface{}, uri string, headers map[st
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(bytes.NewReader(bodyMessage)),
 	}
-	return hc.doBytes(req)
+	return doBytes(req, hc)
 }
 func (hc *httpclient) PutJSONBytes(body interface{}, uri string, headers map[string]string) network.ResponseBytes {
 	bodyMessage, err := json.Marshal(body)
@@ -270,15 +260,10 @@ func (hc *httpclient) PutJSONBytes(body interface{}, uri string, headers map[str
 		Header: httpheaders,
 		Body:   ioutil.NopCloser(bytes.NewReader(bodyMessage)),
 	}
-	return hc.doBytes(req)
+	return doBytes(req, hc)
 }
 
-func (hc *httpclient) do(req *http.Request) network.Response {
-	cookies := hc.client.Jar.Cookies(req.URL)
-	for i := range cookies {
-		req.AddCookie(cookies[i])
-	}
-	reqdump := printRequest(req)
+func do(req *http.Request, hc *httpclient) network.Response {
 	resp, err := hc.client.Do(req)
 	if err != nil {
 		return network.Response{
@@ -286,10 +271,21 @@ func (hc *httpclient) do(req *http.Request) network.Response {
 		}
 	}
 
-	respdump := printResponse(resp)
-	hc.printRR(reqdump, respdump)
+	var reader io.ReadCloser
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		reader, err = gzip.NewReader(resp.Body)
+		if err != nil {
+			return network.Response{
+				Err: err,
+			}
+		}
+		defer reader.Close()
+	default:
+		reader = resp.Body
+	}
 
-	bodyMessage, err := ioutil.ReadAll(resp.Body)
+	bodyMessage, err := ioutil.ReadAll(reader)
 	if err != nil {
 		return network.Response{
 			Err: err,
@@ -303,53 +299,49 @@ func (hc *httpclient) do(req *http.Request) network.Response {
 			Err: err,
 		}
 	}
-	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+
+	if resp.StatusCode < 200 && resp.StatusCode > 300 {
 		return network.Response{Response: response, Err: fmt.Errorf("%s", string(bodyMessage))}
 	}
 	return network.Response{Response: response, Err: nil}
 }
-func (hc *httpclient) doBytes(req *http.Request) network.ResponseBytes {
-	cookies := hc.client.Jar.Cookies(req.URL)
-	for i := range cookies {
-		req.AddCookie(cookies[i])
-	}
-	reqdump := printRequest(req)
+func doBytes(req *http.Request, hc *httpclient) network.ResponseBytes {
+	dumpReq, _ := httputil.DumpRequestOut(req, true)
 	resp, err := hc.client.Do(req)
 	if err != nil {
 		return network.ResponseBytes{
 			Err: err,
 		}
 	}
-	respdump := printResponse(resp)
-	hc.printRR(reqdump, respdump)
-	bodyMessage, err := ioutil.ReadAll(resp.Body)
+	dumpRes, _ := httputil.DumpResponse(resp, false)
+	var reader io.ReadCloser
+	switch resp.Header.Get("Content-Encoding") {
+	case "gzip":
+		reader, err = gzip.NewReader(resp.Body)
+		if err != nil {
+			return network.ResponseBytes{
+				Err: err,
+			}
+		}
+		defer reader.Close()
+	default:
+		reader = resp.Body
+	}
+
+	bodyMessage, err := ioutil.ReadAll(reader)
 	if err != nil {
 		return network.ResponseBytes{
 			Err: err,
 		}
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+
+	hc.file.Write(dumpReq)
+	hc.file.Write(dumpRes)
+	hc.file.Write(bodyMessage)
+
+	if resp.StatusCode < 200 && resp.StatusCode > 300 {
 		return network.ResponseBytes{Response: bodyMessage, Err: fmt.Errorf("%s", string(bodyMessage))}
 	}
 	return network.ResponseBytes{Response: bodyMessage, Err: nil}
-}
-
-func printRequest(req *http.Request) (dump []byte) {
-	if debugNetwork {
-		dump, _ = httputil.DumpRequestOut(req, true)
-	}
-	return
-}
-func printResponse(resp *http.Response) (dump []byte) {
-	if debugNetwork {
-		dump, _ = httputil.DumpResponse(resp, false)
-	}
-	return
-}
-
-func (hc *httpclient) printRR(reqDump, respDump []byte) {
-	if debugNetwork {
-		fmt.Println(string(reqDump))
-	}
 }
